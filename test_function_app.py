@@ -1,32 +1,34 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, mock_open
 import json
 import os
 import azure.functions as func
-from function_app import crud_api, table_client
+
+# Set environment variables before importing the function app
+os.environ["AZURE_TABLE_STORAGE_CONNECTION_STRING"] = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;"
+os.environ["AZURE_TABLE_STORAGE_TABLE_NAME"] = "testtable"
+
+from function_app import crud_api
 
 class TestCrudApi(unittest.TestCase):
 
-    def setUp(self):
-        # Set up environment variables for tests
-        os.environ["AZURE_TABLE_STORAGE_CONNECTION_STRING"] = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;"
-        os.environ["AZURE_TABLE_STORAGE_TABLE_NAME"] = "testtable"
-
-    @patch('azure.data.tables.TableClient')
+    @patch('function_app.table_client')
     def test_create_entity(self, mock_table_client):
         """
-        Test creating a new entity.
+        Test creating a new entity with PartitionKey and RowKey.
         """
         # Arrange
+        req_body = {
+            "PartitionKey": "testpartition",
+            "RowKey": "testrow",
+            "data": {"message": "Hello, World!"}
+        }
         req = func.HttpRequest(
             method='POST',
-            body=json.dumps({'data': {'message': 'Hello, World!'}, 'PartitionKey': 'testpartition'}).encode('utf-8'),
+            body=json.dumps(req_body).encode('utf-8'),
             url='/api/data'
         )
         
-        # Mock the TableClient's create_entity method
-        mock_table_client.create_entity = MagicMock()
-
         # Act
         resp = crud_api(req)
 
@@ -37,10 +39,30 @@ class TestCrudApi(unittest.TestCase):
         # Check the response body
         resp_body = json.loads(resp.get_body())
         self.assertEqual(resp_body['PartitionKey'], 'testpartition')
-        self.assertIn('RowKey', resp_body)
-        self.assertEqual(json.loads(resp_body['data']), {'message': 'Hello, World!'})
+        self.assertEqual(resp_body['RowKey'], 'testrow')
+        self.assertEqual(resp_body['data'], {'message': 'Hello, World!'})
 
-    @patch('azure.data.tables.TableClient')
+    @patch('function_app.table_client')
+    def test_create_entity_missing_keys(self, mock_table_client):
+        """
+        Test creating an entity with missing PartitionKey or RowKey.
+        """
+        # Arrange
+        req_body = {"data": {"message": "This should fail"}}
+        req = func.HttpRequest(
+            method='POST',
+            body=json.dumps(req_body).encode('utf-8'),
+            url='/api/data'
+        )
+        
+        # Act
+        resp = crud_api(req)
+
+        # Assert
+        self.assertEqual(resp.status_code, 400)
+        mock_table_client.create_entity.assert_not_called()
+
+    @patch('function_app.table_client')
     def test_get_entity(self, mock_table_client):
         """
         Test retrieving an existing entity.
@@ -51,7 +73,7 @@ class TestCrudApi(unittest.TestCase):
         entity = {
             "PartitionKey": partition_key,
             "RowKey": row_key,
-            "data": json.dumps({"message": "Hello!"})
+            "data": {"message": "Hello!"}
         }
         
         req = func.HttpRequest(
@@ -60,21 +82,20 @@ class TestCrudApi(unittest.TestCase):
             route_params={'partitionKey': partition_key, 'rowKey': row_key}
         )
         
-        # Mock the TableClient's get_entity method
-        mock_table_client.get_entity = MagicMock(return_value=entity)
+        mock_table_client.get_entity.return_value = entity
 
         # Act
         resp = crud_api(req)
 
         # Assert
         self.assertEqual(resp.status_code, 200)
-        mock_table_client.get_entity.assert_called_with(partition_key=partition_key, row_key=row_key)
+        mock_table_client.get_entity.assert_called_with(partition_key, row_key)
         
         # Check the response body
         resp_body = json.loads(resp.get_body())
-        self.assertEqual(resp_body, {"PartitionKey": partition_key, "RowKey": row_key, "data": {"message": "Hello!"}})
+        self.assertEqual(resp_body, entity)
 
-    @patch('azure.data.tables.TableClient')
+    @patch('function_app.table_client')
     def test_update_entity(self, mock_table_client):
         """
         Test updating an existing entity.
@@ -91,9 +112,6 @@ class TestCrudApi(unittest.TestCase):
             route_params={'partitionKey': partition_key, 'rowKey': row_key}
         )
         
-        # Mock the TableClient's update_entity method
-        mock_table_client.update_entity = MagicMock()
-
         # Act
         resp = crud_api(req)
 
@@ -101,7 +119,7 @@ class TestCrudApi(unittest.TestCase):
         self.assertEqual(resp.status_code, 204)
         mock_table_client.update_entity.assert_called_once()
         
-    @patch('azure.data.tables.TableClient')
+    @patch('function_app.table_client')
     def test_delete_entity(self, mock_table_client):
         """
         Test deleting an entity.
@@ -116,15 +134,12 @@ class TestCrudApi(unittest.TestCase):
             route_params={'partitionKey': partition_key, 'rowKey': row_key}
         )
         
-        # Mock the TableClient's delete_entity method
-        mock_table_client.delete_entity = MagicMock()
-
         # Act
         resp = crud_api(req)
 
         # Assert
         self.assertEqual(resp.status_code, 204)
-        mock_table_client.delete_entity.assert_called_with(partition_key=partition_key, row_key=row_key)
+        mock_table_client.delete_entity.assert_called_with(partition_key, row_key)
 
 if __name__ == '__main__':
     unittest.main()
